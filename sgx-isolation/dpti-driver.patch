@@ -1,0 +1,1110 @@
+diff --git a/Makefile b/Makefile
+index c0963fc..fd969ef 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,8 @@ ifneq ($(KERNELRELEASE),)
+ 		sgx_vma.o \
+ 		sgx_util.o\
+ 		sgx_encl.o \
+-		sgx_encl2.o
++		sgx_encl2.o \
++		sgx_isolation.o
+ 	obj-m += isgx.o
+ else
+ KDIR := /lib/modules/$(shell uname -r)/build
+@@ -24,3 +25,9 @@ endif
+ 
+ clean:
+ 	rm -vrf *.o *.ko *.order *.symvers *.mod.c .tmp_versions .*o.cmd *.mod
++
++load: default
++	-sudo /opt/intel/sgx-aesm-service/cleanup.sh
++	-sudo rmmod isgx
++	sudo insmod isgx.ko
++	sudo /opt/intel/sgx-aesm-service/startup.sh
+\ No newline at end of file
+diff --git a/sgx.h b/sgx.h
+index 62c19da..d06757e 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -165,6 +165,7 @@ struct sgx_encl {
+ 	unsigned int secs_child_cnt;
+ 	struct mutex lock;
+ 	struct mm_struct *mm;
++	struct mm_struct *mm_non_isolated;
+ 	struct file *backing;
+ 	struct file *pcmd;
+ 	struct list_head load_list;
+@@ -181,6 +182,15 @@ struct sgx_encl {
+ 	struct list_head encl_list;
+ 	struct mmu_notifier mmu_notifier;
+ 	unsigned int shadow_epoch;
++
++	unsigned long min_vadr, max_vadr;
++
++	int is_intel_enclave;
++	uint64_t enclave_bridge;
++	uint64_t signal_handler;
++
++	pgd_t *cr3;
++	pgd_t *orig_cr3;
+ };
+ 
+ struct sgx_epc_bank {
+diff --git a/sgx_encl.c b/sgx_encl.c
+index 04a1b9c..7791353 100644
+--- a/sgx_encl.c
++++ b/sgx_encl.c
+@@ -59,6 +59,7 @@
+  */
+ 
+ #include "sgx.h"
++#include "sgx_isolation.h"
+ #include <asm/mman.h>
+ #include <linux/delay.h>
+ #include <linux/file.h>
+@@ -249,13 +250,15 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req,
+ 		sgx_put_backing(backing, 0);
+ 		return false;
+ 	}
+-
+-        ret = sgx_vm_insert_pfn(vma, encl_page->addr, epc_page->pa);
+-        if (ret != VM_FAULT_NOPAGE) {
++	
++	ret = sgx_vm_insert_pfn(vma, encl_page->addr, epc_page->pa);
++	if (ret != VM_FAULT_NOPAGE) {
+ 		sgx_put_backing(backing, 0);
+ 		return false;
+ 	}
+ 
++	sgx_isolation_added_page(encl, vma, encl_page->addr);
++
+ 	ret = sgx_eadd(encl->secs.epc_page, epc_page, encl_page->addr,
+ 		       &req->secinfo, backing);
+ 
+@@ -281,6 +284,7 @@ static bool sgx_process_add_page_req(struct sgx_add_page_req *req,
+ 	list_add_tail(&epc_page->list, &encl->load_list);
+ 	encl_page->flags |= SGX_ENCL_PAGE_ADDED;
+ 
++
+ 	return true;
+ }
+ 
+@@ -565,13 +569,14 @@ static struct sgx_encl *sgx_encl_alloc(struct sgx_secs *secs)
+ 	mutex_init(&encl->lock);
+ 	INIT_WORK(&encl->add_page_work, sgx_add_page_worker);
+ 
+-	encl->mm = current->mm;
+ 	encl->base = secs->base;
+ 	encl->size = secs->size;
+ 	encl->ssaframesize = secs->ssaframesize;
+ 	encl->backing = backing;
+ 	encl->pcmd = pcmd;
+ 
++	sgx_isolation_init_mm(encl);
++
+ 	return encl;
+ }
+ 
+@@ -798,6 +803,13 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
+ 			return ret;
+ 	}
+ 
++	if (addr < encl->min_vadr) {
++		encl->min_vadr = addr;
++	}
++	if (addr > encl->max_vadr) {
++		encl->max_vadr = addr;
++	}
++
+ 	ret = sgx_init_page(encl, encl_page, addr, 0, NULL, false);
+ 	if (ret)
+ 		return ret;
+@@ -986,6 +998,8 @@ void sgx_encl_release(struct kref *ref)
+ 		list_del(&encl->encl_list);
+ 	mutex_unlock(&sgx_tgid_ctx_mutex);
+ 
++	sgx_isolation_release_enclave(encl);
++
+ 	if (encl->mmu_notifier.ops)
+ 		mmu_notifier_unregister(&encl->mmu_notifier, encl->mm);
+ 
+diff --git a/sgx_ioctl.c b/sgx_ioctl.c
+index 56ab1e6..a5b4a45 100644
+--- a/sgx_ioctl.c
++++ b/sgx_ioctl.c
+@@ -59,6 +59,8 @@
+  */
+ 
+ #include "sgx.h"
++#include "sgx_isolation.h"
++#include "sgx_user.h"
+ #include <asm/mman.h>
+ #include <linux/delay.h>
+ #include <linux/file.h>
+@@ -72,6 +74,23 @@
+ #include <linux/slab.h>
+ #include <linux/hashtable.h>
+ #include <linux/shmem_fs.h>
++#include <linux/sched.h>
++#include <linux/sched/mm.h>
++
++//reduce later
++#include <asm/mmu_context.h>
++#include <asm/tlbflush.h>
++
++#include <linux/kprobes.h>
++#include <linux/kallsyms.h>
++#include <linux/version.h>
++#include <linux/sched/mm.h>
++#include <linux/module.h>
++#include <linux/list.h>
++#include <linux/sort.h>
++#include <linux/pagewalk.h>
++#include <linux/mmdebug.h>
++#include <linux/mm.h>
+ 
+ int sgx_get_encl(unsigned long addr, struct sgx_encl **encl)
+ {
+@@ -377,6 +396,68 @@ long sgx_ioc_page_remove(struct file *filep, unsigned int cmd,
+ 	return ret;
+ }
+ 
++// isolation
++long sgx_ioc_isolation_add_bridge(struct file *filep, unsigned int cmd, unsigned long arg)
++{
++	struct sgx_encl *encl;
++	struct sgx_isolation_bridge_param *p = (struct sgx_isolation_bridge_param *) arg;
++	
++	if (sgx_get_encl(p->encl_addr, &encl) != 0) {
++		pr_warn("sgx: No enclave found at start address 0x%llx\n", p->encl_addr);
++		return -EINVAL;
++	}
++
++	sgx_isolation_add_bridge(encl, p->bridge_addr, p->bridge_size);
++
++	kref_put(&encl->refcount, sgx_encl_release);
++
++	return 0;
++}
++
++long sgx_ioc_isolation_begin(struct file *filep, unsigned int cmd, unsigned long arg)
++{
++	struct sgx_encl *encl;
++	struct sgx_isolation_enclave_id_param *p = (struct sgx_isolation_enclave_id_param *) arg;
++
++	if (sgx_get_encl(p->encl_addr, &encl) != 0) {
++		printk("sgx: No enclave found for address 0x%llx\n", p->encl_addr);
++		return -EINVAL;
++	}
++	
++	sgx_isolation_begin(encl);
++
++	kref_put(&encl->refcount, sgx_encl_release);
++
++	return 0;
++}
++
++long sgx_ioc_isolation_end(struct file *filep, unsigned int cmd,
++			 unsigned long arg)
++{
++	sgx_isolation_end();
++	return 0;
++}
++
++long sgx_ioc_isolation_setup(struct file *filep, unsigned int cmd,
++			 unsigned long arg)
++{
++
++	struct sgx_encl *encl = NULL;
++	struct sgx_isolation_enclave_setup *p = (struct sgx_isolation_enclave_setup *) arg;
++
++	if (sgx_get_encl(p->encl_addr, &encl) != 0) {
++		pr_warn("sgx: No enclave found at address 0x%llx\n", p->encl_addr);
++		return -EINVAL;
++	}
++	
++	sgx_isolation_setup(encl, p);
++
++	kref_put(&encl->refcount, sgx_encl_release);
++
++	return 0;
++}
++
++
+ typedef long (*sgx_ioc_t)(struct file *filep, unsigned int cmd,
+ 			  unsigned long arg);
+ 
+@@ -411,13 +492,27 @@ long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
+ 	case SGX_IOC_ENCLAVE_PAGE_REMOVE:
+ 		handler = sgx_ioc_page_remove;
+ 		break;
++	case SGX_IOC_ENCLAVE_ISOLATION_ADD_BRIDGE:
++		handler = sgx_ioc_isolation_add_bridge;
++		break;
++	case SGX_IOC_ENCLAVE_ISOLATION_BEGIN:
++		handler = sgx_ioc_isolation_begin;
++		break;
++	case SGX_IOC_ENCLAVE_ISOLATION_END:
++		handler = sgx_ioc_isolation_end;
++		break;
++	case SGX_IOC_ENCLAVE_ISOLATION_SETUP:
++		handler = sgx_ioc_isolation_setup;
++		break;
+ 	default:
++		printk("unknown ioctl cmd %u!\n", cmd);
+ 		return -ENOIOCTLCMD;
+ 	}
+ 
+-	if (copy_from_user(data, (void __user *)arg, _IOC_SIZE(cmd)))
+-		return -EFAULT;
+-
++	if ( cmd & IOC_IN ) {
++		if (copy_from_user(data, (void __user *)arg, _IOC_SIZE(cmd)))
++			return -EFAULT;
++	}
+ 	ret = handler(filep, cmd, (unsigned long)((void *)data));
+ 	if (!ret && (cmd & IOC_OUT)) {
+ 		if (copy_to_user((void __user *)arg, data, _IOC_SIZE(cmd)))
+diff --git a/sgx_isolation.c b/sgx_isolation.c
+new file mode 100644
+index 0000000..6938ee8
+--- /dev/null
++++ b/sgx_isolation.c
+@@ -0,0 +1,699 @@
++#include "sgx_isolation.h"
++#include "sgx.h"
++#include "sgx_user.h"
++
++#include <asm/mmu_context.h>
++#include <asm/tlbflush.h>
++
++#include <linux/kprobes.h>
++#include <linux/kallsyms.h>
++#include <linux/version.h>
++#include <linux/sched/mm.h>
++#include <linux/module.h>
++#include <linux/list.h>
++#include <linux/sort.h>
++#include <linux/pagewalk.h>
++#include <linux/mmdebug.h>
++#include <linux/mm.h>
++#include <asm/pgalloc.h>
++#include <asm/processor.h>
++
++#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++
++#define REUSE_ISOLATION
++
++//#define dbg_print(_message,...) printk("sgx-isolation: " _message, ##__VA_ARGS__)
++#define dbg_print(_message,...) 
++
++// interfaced over kallsyms hell
++typedef void (*dup_mmap_t)(struct mm_struct *oldmm, struct mm_struct *mm);
++typedef void (*switch_mm_t)(struct mm_struct *prev, struct mm_struct *next, struct task_struct *tsk);
++typedef struct mm_struct *(*dup_mm_t)(struct task_struct *tsk, struct mm_struct *oldmm);
++typedef void (*flush_tlb_all_t)(void);
++typedef int (*walk_page_range_t)(struct mm_struct *mm, unsigned long start, unsigned long end, const struct mm_walk_ops *ops, void *private);
++typedef struct mm_struct *(*mm_alloc_t)(void);
++typedef void (*mmgrab_t)(struct mm_struct *mm);
++typedef void (*vmacache_update_t)(unsigned long addr, struct vm_area_struct *newvma);
++typedef int (*walk_page_vma_t)(struct vm_area_struct *vma, const struct mm_walk_ops *ops, void *private);
++typedef pgd_t *(*pgd_alloc_t)(struct mm_struct *mm);
++typedef void (*pgd_free_t)(struct mm_struct *mm, pgd_t *pgd);
++typedef long (*populate_vma_page_range_t)(struct vm_area_struct *vma, unsigned long start, unsigned long end, int *locked);
++typedef void (*load_new_mm_cr3_t)(pgd_t *pgdir, u16 new_asid, bool need_flush);
++typedef vm_fault_t (*do_anonymous_page_t)(struct vm_fault *vmf);
++
++dup_mm_t ptr_dup_mm;
++switch_mm_t ptr_switch_mm;
++mm_alloc_t ptr_mm_alloc;
++walk_page_range_t ptr_walk_page_range;
++flush_tlb_all_t ptr_flush_tlb_all;
++vmacache_update_t ptr_vmacache_update;
++walk_page_vma_t ptr_walk_page_vma;
++pgd_alloc_t ptr_pgd_alloc;
++pgd_free_t ptr_pgd_free;
++populate_vma_page_range_t ptr_populate_vma_page_range;
++load_new_mm_cr3_t ptr_load_new_mm_cr3;
++do_anonymous_page_t ptr_do_anonymous_page;
++
++// kallsyms hack
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
++unsigned long kallsyms_lookup_name(const char* name) {
++  struct kprobe kp = {
++    .symbol_name    = name,
++  };
++
++  int ret = register_kprobe(&kp);
++  if (ret < 0) {
++    return 0;
++  };
++
++  unregister_kprobe(&kp);
++
++  return (unsigned long) kp.addr;
++}
++#endif
++
++// utility
++#define GET_SYMBOL(_name)                                                          \
++  ptr_##_name = (_name##_t) kallsyms_lookup_name(#_name);                          \
++  if (ptr_##_name == NULL) {                                                       \
++    dbg_print("cannot get symbol: " #_name "!\n");                     \
++  } else {                                                                         \
++    dbg_print("found symbol \"" #_name "\" at 0x%llx\n", (unsigned long long)ptr_##_name); \
++  }
++
++static int compare_u64(const void *lhs, const void *rhs) {
++    uint64_t lhs_integer = *(const uint64_t *)(lhs);
++    uint64_t rhs_integer = *(const uint64_t *)(rhs);
++
++    if (lhs_integer < rhs_integer) return -1;
++    if (lhs_integer > rhs_integer) return 1;
++    return 0;
++}
++
++
++static pte_t *resolve_pte(pgd_t *cr3, unsigned long addr, int allocate) {
++
++  pgd_t *pgd;
++  p4d_t *p4d;
++  pud_t *pud;
++  pmd_t *pmd;
++  pte_t *pte;
++
++  pgd = pgd_offset_pgd(cr3, addr);
++  if (!pgd) {
++    dbg_print("PGD not allocated!\n");
++    return 0;
++  }
++
++#define pte_offset pte_offset_map
++
++#define my_pmd_populate set_pmd(pmd, __pmd(_PAGE_TABLE | __pa(pte)));
++#define my_pud_populate set_pud(pud, __pud(_PAGE_TABLE | __pa(pmd)));
++#define my_p4d_populate set_p4d(p4d, __p4d(_PAGE_TABLE | __pa(pud)));
++#define my_pgd_populate set_pgd(pgd, __pgd(_PAGE_TABLE | __pa(p4d)));
++
++#define LEVEL(_cur,_next)                                        \
++  if (_cur##_none(*_cur)) {                                      \
++    if (allocate == 0) {                                         \
++      return NULL;                                               \
++    }                                                            \
++    /*dbg_print(#_cur " is none ... setting up " #_next "\n");*/ \
++    _next = (_next##_t *)get_zeroed_page(GFP_KERNEL_ACCOUNT);    \
++    if (!_next) {                                                \
++      dbg_print(#_next " not allocated!\n");                     \
++      return NULL;                                               \
++    }                                                            \
++    my_##_cur##_populate                                         \
++  }                                                              \
++  _next = _next##_offset(_cur, addr);                            \
++  if (!_next) {                                                  \
++    dbg_print(#_next " not allocated!\n");                       \
++    return NULL;                                                 \
++  }                                                              \
++
++
++  LEVEL(pgd, p4d);
++  LEVEL(p4d, pud);
++  LEVEL(pud, pmd);
++  LEVEL(pmd, pte);
++
++
++#undef pte_offset
++#undef LEVEL
++
++  return pte;
++}
++
++// enclave lookup
++// BOOKKEEPING
++LIST_HEAD(enclave_thread_list);
++
++struct checkpoint {
++  uint64_t sp;
++  uint64_t bp;
++};
++
++struct enclave_thread_entry {
++  struct list_head head;
++  struct sgx_encl *encl;
++  struct task_struct *task;
++  struct checkpoint cp;
++  pte_t *ms_struct_pte;
++  int is_free;
++};
++
++void sgx_isolation_enclave_add_enclave_thread_entry(struct enclave_thread_entry *to_copy) {
++  struct enclave_thread_entry *entry, *tmp;
++
++  dbg_print("adding task to enclave mapping 0x%lx -> 0x%lx\n", (unsigned long)to_copy->task,  (unsigned long)to_copy->encl);
++
++  // reuse entry
++  list_for_each_entry_safe(entry, tmp, &enclave_thread_list, head) {
++    if (entry->is_free) {
++      entry->encl          = to_copy->encl;
++      entry->task          = to_copy->task;
++      entry->cp            = to_copy->cp;
++      entry->ms_struct_pte = to_copy->ms_struct_pte;
++      entry->is_free       = 0;
++      return;
++    }
++  }
++
++  // allocate new one
++  entry = kmalloc(sizeof(struct enclave_thread_entry), GFP_KERNEL);
++  *entry = *to_copy;
++  entry->is_free = 0;
++  list_add(&entry->head, &enclave_thread_list);
++}
++
++void sgx_isolation_enclave_remove_enclave_thread_entry(struct enclave_thread_entry *entry) {
++  dbg_print("removing entry: 0x%lx -> 0x%lx\n", (unsigned long)entry->task, (unsigned long)entry->encl);
++
++  entry->is_free = 1;
++
++  //list_del(&entry->head);
++  //kfree(entry);
++}
++
++struct enclave_thread_entry *sgx_isolation_enclave_get_thread_entry_from_current(void) {
++  struct enclave_thread_entry *entry;
++
++  list_for_each_entry(entry, &enclave_thread_list, head) {
++    if (entry->is_free == 0 && entry->task == current) {
++      //dbg_print("found task to enclave mapping 0x%lx -> 0x%lx\n", (unsigned long)entry->task,  (unsigned long)entry->encl);
++      return entry;
++    }
++  }
++  return NULL;
++}
++
++void sgx_isolation_release_enclave(struct sgx_encl *encl) {
++   struct enclave_thread_entry *entry, *tmp;
++
++  dbg_print("removing enclave 0x%lx\n", (unsigned long)encl);
++
++  list_for_each_entry_safe(entry, tmp, &enclave_thread_list, head) {
++    if (entry->is_free == 0 && entry->encl == encl) {
++      sgx_isolation_enclave_remove_enclave_thread_entry(entry);
++    }
++  }
++
++  /*list_for_each_entry(entry, &enclave_thread_list, head) {
++    dbg_print("list entry: 0x%lx -> 0x%lx\n", (unsigned long)entry->task, (unsigned long)entry->encl);
++  }*/
++}
++
++
++// ###################################################################
++void sgx_isolation_global_init(void) {
++  dbg_print("global init\n");
++
++  GET_SYMBOL(dup_mm);
++  GET_SYMBOL(switch_mm);
++  GET_SYMBOL(mm_alloc);
++  GET_SYMBOL(walk_page_range);
++  GET_SYMBOL(flush_tlb_all);
++  GET_SYMBOL(vmacache_update);
++  GET_SYMBOL(walk_page_vma);
++  GET_SYMBOL(pgd_alloc);
++  GET_SYMBOL(pgd_free);
++  GET_SYMBOL(populate_vma_page_range);
++  GET_SYMBOL(load_new_mm_cr3);
++  GET_SYMBOL(do_anonymous_page);
++}
++
++void sgx_isolation_global_deinit(void) {
++  struct enclave_thread_entry *entry, *tmp;
++
++  dbg_print("global deinit\n");
++
++  list_for_each_entry_safe(entry, tmp, &enclave_thread_list, head) {
++    list_del(&entry->head);
++    dbg_print("removing entry: 0x%lx -> 0x%lx\n", (unsigned long)entry->task, (unsigned long)entry->encl);
++    kfree(entry); 
++  }
++}
++
++void sgx_isolation_init_mm(struct sgx_encl *encl) {
++  dbg_print("enclave init 0x%lx -> base %lx\n", (unsigned long)encl, (unsigned long)encl->base);
++
++  encl->mm = current->mm;
++  encl->mm_non_isolated = current->mm;
++
++  encl->min_vadr = -1;
++  encl->max_vadr = 0;
++
++  //encl->bridge_count = 0;
++
++  encl->is_intel_enclave = 0;
++
++  encl->orig_cr3 = encl->mm->pgd;
++  encl->cr3 = ptr_pgd_alloc(encl->mm);
++  current->mm->pgd = encl->orig_cr3;
++  
++  dbg_print("allocated enclave pgd: 0x%lx", (unsigned long)encl->cr3);
++}
++
++
++
++void sgx_isolation_add_bridge(struct sgx_encl *encl, unsigned long long address, unsigned long long size) {
++
++  if (encl->is_intel_enclave) {
++    return;
++  }
++
++  uint64_t i;
++  
++  dbg_print("add bridge  0x%lx,  addr: %llx size: %llu\n", (unsigned long)encl, address, size);
++  
++  for (i = (address & ~0xFFF); i < address + size; i += 0x1000) {
++    pte_t *orig = resolve_pte(encl->orig_cr3, i, 0);
++    pte_t *isol = resolve_pte(encl->cr3, i, 1);
++    *isol = *orig;
++  }
++}
++
++
++
++struct vm_ops_private_data {
++  void *original_private_data;
++  vm_fault_t (*original_fault_handler)(struct vm_fault *vmf);
++  unsigned long last_isolated_sp;
++};
++
++struct vm_ops_replacement {
++  struct vm_ops_private_data private;
++  struct vm_operations_struct ops;
++};
++
++static vm_fault_t isolation_fault_handler(struct vm_fault *vmf) {
++  static vm_fault_t ret;
++  struct vm_ops_private_data *private = vmf->vma->vm_private_data;
++
++  struct enclave_thread_entry *entry = sgx_isolation_enclave_get_thread_entry_from_current();
++
++  dbg_print("FAULT: 0x%16lx\n", vmf->address);
++  dbg_print("task -> entry: 0x%16lx -> 0x%16lx\n", current, entry);
++   
++  // thread is running in isolation
++  if (entry) {
++    int is_allowed_fault = 0;
++
++    if ( (entry->encl->base <= vmf->address) && ( vmf->address < (entry->encl->base + entry->encl->size) ) ) {
++      dbg_print("fault inside SGX!\n");
++    }
++
++    if ( vmf->address == (entry->encl->enclave_bridge + 0x1000) ) {
++      dbg_print("isolation end called due to bridge end!\n");
++      is_allowed_fault = 1;
++    }
++
++    if ( vmf->address == entry->encl->signal_handler ) {
++      dbg_print("isolation end called due to signal handler end!\n");
++      is_allowed_fault = 1;
++    }
++
++    if (   (vmf->vma->vm_flags & VM_STACK) 
++        && (vmf->vma->vm_start <= entry->cp.sp) 
++        && (entry->cp.sp < vmf->vma->vm_end) 
++        && (vmf->address < entry->cp.sp) 
++    ) {
++      dbg_print("the stack just grew 0x%lx -> 0x%lx - 0x%lx!\n", vmf->address, vmf->vma->vm_start, vmf->vma->vm_end);
++      dbg_print("pte: 0x%lx\n", vmf->pte);
++
++      //return ptr_do_anonymous_page(vmf);
++      return VM_FAULT_SIGSEGV; 
++    }
++
++    if (is_allowed_fault && sgx_isolation_end()) {
++      return VM_FAULT_NOPAGE;
++    } else {
++      dbg_print("isolated fault!\n");
++      return VM_FAULT_SIGSEGV; 
++    }
++  }
++
++
++
++  if (!private->original_fault_handler) {
++    dbg_print("no handler!\n");
++    return VM_FAULT_SIGSEGV;
++  }
++
++  // restore default private data
++  vmf->vma->vm_private_data = private->original_private_data;
++  // call original fault handler
++  ret = (private->original_fault_handler)(vmf);
++  // restore isolated fault handler
++  vmf->vma->vm_private_data = private;
++  
++  return ret; 
++}
++
++void replace_vm_ops(struct vm_area_struct *vma) {
++  struct vm_ops_replacement *r = (struct vm_ops_replacement*) kzalloc(sizeof(struct vm_ops_replacement), GFP_KERNEL);
++  if (!r) {
++    dbg_print("OOM\n");
++    return;
++  }
++
++  r->private.original_private_data = vma->vm_private_data;
++  r->private.last_isolated_sp      = 0;
++
++  if (vma->vm_ops) {
++    // replace ops
++    r->ops = *vma->vm_ops;
++    r->private.original_fault_handler = vma->vm_ops->fault;
++  }
++
++  // modify the ops to catch the page faults
++  r->ops.fault     = &isolation_fault_handler;
++  r->ops.map_pages = NULL;
++
++  // replace vm_ops
++  vma->vm_ops          = &r->ops;
++  vma->vm_private_data = &r->private;
++}
++
++
++#define USE_SU_BIT 0
++
++static int setup_pte(pte_t *pte_in, unsigned long addr, unsigned long next, struct mm_walk *walk) {
++  struct sgx_encl *encl = walk->private;
++
++  if (pte_none(*pte_in)) {
++    //*(uint64_t*)remap = 0;
++    return 0;
++  }
++
++  if ( (walk->vma->vm_flags & VM_STACK) ) {
++    dbg_print("found stack: 0x%lx\n", addr);
++  }
++
++  
++  if ( (walk->vma->vm_flags & VM_STACK) || (addr == encl->enclave_bridge) || (encl->base <= addr && addr < (encl->base + encl->size) ) ) {
++    pte_t *remap = resolve_pte(encl->cr3, addr, 1);
++    *remap = *pte_in;
++  } else {
++#if USE_SU_BIT
++    
++    if (addr == (encl->enclave_bridge + 0x1000) || addr == encl->signal_handler ) {
++      
++      //*(uint64_t*)remap = 0;
++    } else {
++      pte_t *remap = resolve_pte(encl->cr3, addr, 1);
++      *(uint64_t*)remap = *(uint64_t*)pte_in & ~(1llu << 2);
++    }
++#else
++    
++#endif
++  }
++
++  return 0;
++}
++
++static void setup_vma(struct mm_walk *walk) {
++  
++#if USE_SU_BIT
++  struct sgx_encl *encl = walk->private;
++  uint64_t enclu_after_page = encl->enclave_bridge + 0x1000;
++
++  if ( (walk->vma->vm_start <= enclu_after_page && enclu_after_page < walk->vma->vm_end) ||
++       (walk->vma->vm_start <= encl->signal_handler && encl->signal_handler < walk->vma->vm_end)
++  ) {
++    dbg_print("replace vma: 0x%lx - 0x%lx is anon: %d\n", walk->vma->vm_start, walk->vma->vm_end, walk->vma->vm_ops ? 1 : 0);
++    replace_vm_ops(walk->vma);
++  }
++#else
++  dbg_print("replace vma: 0x%lx - 0x%lx is anon: %d\n", walk->vma->vm_start, walk->vma->vm_end, walk->vma->vm_ops ? 0 : 1);
++  replace_vm_ops(walk->vma);
++#endif
++}
++
++struct mm_walk_ops walk_setup = {
++  .pte_entry     = &setup_pte,
++  .post_vma      = &setup_vma
++};
++
++struct walk_isolate_stack_data {
++  struct sgx_encl *encl;
++  unsigned long stack_isolation_start;
++  unsigned long ms_struct;
++};
++
++static int isolate_stack(pte_t *pte, unsigned long addr, unsigned long next, struct mm_walk *walk) {
++  struct walk_isolate_stack_data *private = walk->private;
++
++  if (addr < (private->stack_isolation_start) || addr == private->ms_struct) {
++    dbg_print("++ stack 0x%16lx\n", addr);
++#if defined(ISOLATE_STACK_UNMAP)
++    pte_t* orig = resolve_pte(private->encl->orig_cr3, addr, 0);
++    *(uint64_t*)pte = *(uint64_t*)orig;
++#else 
++    *(uint64_t*)pte = *(uint64_t*)pte | (1llu << 2);
++#endif
++  } else {
++    dbg_print("-- stack 0x%16lx\n", addr);
++#if defined(ISOLATE_STACK_UNMAP)
++    *(uint64_t*)pte = 0
++#else 
++    *(uint64_t*)pte = *(uint64_t*)pte & ~(1llu << 2);
++#endif
++    
++  }
++
++  return 0;
++}
++
++struct mm_walk_ops walk_isolate_stack = {
++  .pte_entry     = &isolate_stack,
++};
++
++void sgx_isolation_setup(struct sgx_encl *encl, struct sgx_isolation_enclave_setup *setup) {
++  
++  // copy parameters
++  encl->is_intel_enclave = setup->is_intel_enclave;
++  encl->enclave_bridge   = setup->enclave_bridge;
++  encl->signal_handler   = setup->signal_handler;
++
++  // skip intel enclaves
++  if (encl->is_intel_enclave) {
++    dbg_print("skipped setup for enclave: 0x%lx", (unsigned long)encl);
++    return;
++  }
++
++  dbg_print("setup enclave 0x%lx with bridge 0x%llx\n", (unsigned long)encl, encl->enclave_bridge);
++  dbg_print("bridge:      0x%16lx\n", encl->enclave_bridge);
++  dbg_print("enclu after: 0x%16lx\n", encl->enclave_bridge+0x1000);
++  dbg_print("sig handler: 0x%16lx\n", encl->signal_handler);
++  
++  dbg_print("range: 0x%lx - 0x%lx\n", encl->min_vadr, encl->max_vadr);
++  dbg_print("range: 0x%lx - 0x%lx\n", encl->base, encl->base + encl->size);
++
++  ptr_walk_page_range(encl->mm, 0, (1llu << 48), &walk_setup, encl);
++  unsigned long addr;
++
++  // enclave needs to be mapped ... or use pte hole ...
++  for (addr = encl->min_vadr; addr <= encl->max_vadr; addr += 0x1000) {
++    pte_t *src = resolve_pte(encl->orig_cr3, addr, 1);
++    pte_t *dst = resolve_pte(encl->cr3, addr, 1);
++    *(uint64_t*)dst = *(uint64_t*)src;
++  }
++
++  dbg_print("setup done\n");
++}
++
++
++void sgx_isolation_added_page(struct sgx_encl *encl, struct vm_area_struct *vma, unsigned long address) {
++
++  if (encl->is_intel_enclave) {
++    return;
++  }
++
++  pte_t *pte_src;
++  pte_t *pte_dst;
++
++  if (vma->vm_mm->pgd == encl->cr3) {
++    dbg_print("added page 0x%16lx -> 0x%16lx in isolation\n", (unsigned long)encl, address);
++
++    pte_src = resolve_pte(encl->cr3, address, 0);
++    pte_dst = resolve_pte(encl->orig_cr3, address, 1);
++
++  } else if (vma->vm_mm->pgd == encl->orig_cr3) {
++    dbg_print("added page 0x%16lx -> 0x%16lx added normally\n", (unsigned long)encl, address);
++
++    pte_src = resolve_pte(encl->orig_cr3, address, 0);
++    pte_dst = resolve_pte(encl->cr3, address, 1);
++  } else {
++    dbg_print("added page 0x%16lx -> 0x%16lx somewhere NO IDEA!\n", (unsigned long)encl, address);
++    return;
++  }
++
++  *pte_dst = *pte_src;
++}
++
++
++void sgx_isolation_begin(struct sgx_encl *encl) {
++  
++  if (encl->is_intel_enclave) {
++    dbg_print("isolation begin skipped 0x%lx\n", (unsigned long)encl);
++    return;
++  }
++
++  dbg_print("isolation begin 0x%lx\n", (unsigned long)encl);
++
++  struct pt_regs *regs = task_pt_regs(current);
++
++  uint64_t isolated_sp = regs->r15;
++  uint64_t ms_struct   = regs->r12;
++
++  dbg_print("isp: 0x%llx sp: 0x%lx bp: 0x%lx ms: 0x%llx\n", isolated_sp, regs->sp, regs->bp, ms_struct);
++
++  struct enclave_thread_entry entry;
++  { // add lookup for end
++    
++    entry.encl          = encl;
++    entry.task          = current;
++    entry.cp.sp         = isolated_sp;
++    entry.cp.bp         = regs->bp;
++    entry.ms_struct_pte = ms_struct ? resolve_pte(encl->cr3, ms_struct & ~0xFFF, 0) : NULL;
++    sgx_isolation_enclave_add_enclave_thread_entry(&entry);
++  }
++  
++  { // switch cr3 with new asid
++    current->mm->pgd = encl->cr3;
++    ptr_load_new_mm_cr3(current->mm->pgd, 1, 1);
++  }
++
++  {
++    struct vm_area_struct *vma = find_vma(current->mm, isolated_sp);
++
++    struct vm_ops_private_data *private = vma->vm_private_data;
++
++    if (private->last_isolated_sp == isolated_sp) {
++      dbg_print("reusing stack isolation!\n");
++      // stack is already isolated as we wanted! just
++      if (entry.ms_struct_pte) {
++        *(uint64_t*)entry.ms_struct_pte = *(uint64_t*)entry.ms_struct_pte | (1llu << 2);
++      }
++      
++    } else {
++
++      struct walk_isolate_stack_data walk;
++
++      if ( (ms_struct & 0xFFF) != 0 ) {
++        dbg_print("warning MS struct not aligned!\n");
++      }
++
++      walk.stack_isolation_start = isolated_sp;
++      walk.ms_struct             = ms_struct & ~0xFFF;
++      walk.encl                  = encl;
++
++      ptr_walk_page_vma(vma, &walk_isolate_stack, &walk);
++
++#if defined(REUSE_ISOLATION)
++      private->last_isolated_sp = isolated_sp;
++#endif
++    }
++
++    
++  }
++
++}
++
++int sgx_isolation_end(void) {
++  struct enclave_thread_entry *entry = sgx_isolation_enclave_get_thread_entry_from_current();
++
++  if (!entry) {
++    dbg_print("no mapping found! current: 0x%lx\n", (unsigned long)current);
++    return 0;
++  }
++
++  struct sgx_encl *encl = entry->encl;
++
++  if (!encl) {
++    dbg_print("empty enclave in mapping! current: 0x%lx\n", (unsigned long)current);
++    return 0;
++  }
++
++  if (encl->is_intel_enclave) {
++    dbg_print("isolation end skipped %p\n", encl);
++    dbg_print("why am I here!?\n");
++    return 1;
++  }
++
++  dbg_print("isolation end 0x%lx\n", (unsigned long)encl);
++
++  struct pt_regs *regs = task_pt_regs(current);
++
++  { // check state
++    
++    dbg_print("sp: 0x%lx bp: 0x%lx ms: 0x%lx\n", regs->sp, regs->bp, regs->si);
++
++    if (regs->bp != entry->cp.bp) {
++      dbg_print("enclave violated base pointer!\n");
++      // uncomment for protection
++      return 0;
++    }
++
++    // check if the return code from the ENCLU instruction is ERET
++    // the attacker can manipulate the value but we only execute the 
++    // ret instruction if we see ERET!
++    int is_eret = regs->di == -1u;
++
++    // otherwise it is an ocall and the stack is modified to pass paramters
++    // but we do not return from the stack!
++
++    if (is_eret && (regs->sp != entry->cp.sp)) {
++      dbg_print("enclave violated stack pointer!\n");
++      // uncomment for protection
++      return 0;
++    }
++  }
++
++  // restrict ms struct access again, so we can reuse the isolated stack
++  if (entry->ms_struct_pte) {
++    *(uint64_t*)entry->ms_struct_pte = *(uint64_t*)entry->ms_struct_pte & ~(1llu << 2);
++  }
++
++#if !defined(REUSE_ISOLATION)
++  { // restore stack
++    struct vm_area_struct *vma = find_vma(current->mm, entry->cp.sp);
++
++    struct walk_isolate_stack_data walk;
++    walk.stack_isolation_start = -1;
++    walk.ms_struct             = 0;
++    walk.encl                  = encl;
++    ptr_walk_page_vma(vma, &walk_isolate_stack, &walk);
++  }
++#endif
++
++  { // switch mapping
++    current->mm->pgd = encl->orig_cr3;
++    ptr_load_new_mm_cr3(current->mm->pgd, 2, 0);
++  }
++
++  sgx_isolation_enclave_remove_enclave_thread_entry(entry);
++
++  return 1;
++}
+\ No newline at end of file
+diff --git a/sgx_isolation.h b/sgx_isolation.h
+new file mode 100644
+index 0000000..ccc0786
+--- /dev/null
++++ b/sgx_isolation.h
+@@ -0,0 +1,30 @@
++
++#ifndef __SGX_ISOLATION__
++#define __SGX_ISOLATION__
++
++struct mm_struct;
++struct sgx_encl;
++struct sgx_isolation_enclave_setup;
++struct vm_area_struct;
++
++void sgx_isolation_global_init(void);
++
++void sgx_isolation_global_deinit(void);
++
++void sgx_isolation_init_mm(struct sgx_encl *encl);
++
++void sgx_isolation_setup(struct sgx_encl *encl, struct sgx_isolation_enclave_setup *setup);
++
++void sgx_isolation_release_enclave(struct sgx_encl *encl);
++
++void sgx_isolation_add_bridge(struct sgx_encl *encl, unsigned long long address, unsigned long long size);
++
++void sgx_isolation_added_page(struct sgx_encl *encl, struct vm_area_struct *vma, unsigned long address);
++
++void sgx_isolation_begin(struct sgx_encl *encl);
++
++int sgx_isolation_end(void);
++
++void sgx_isolation_print_diff_mm(struct mm_struct *mm_x, struct mm_struct *mm_y);
++
++#endif // __SGX_ISOLATION__
+diff --git a/sgx_main.c b/sgx_main.c
+index 4ff4e2b..fd5a9ae 100644
+--- a/sgx_main.c
++++ b/sgx_main.c
+@@ -60,6 +60,7 @@
+ 
+ #include "asm/msr-index.h"
+ #include "sgx.h"
++#include "sgx_isolation.h"
+ #include <linux/acpi.h>
+ #include <linux/file.h>
+ #include <linux/highmem.h>
+@@ -286,6 +287,8 @@ static int sgx_dev_init(struct device *parent)
+ 		pr_info("intel_sgx:  can not reset SGX LE public key hash MSRs\n");
+ 	}
+ 
++	sgx_isolation_global_init();
++
+ 	return 0;
+ out_workqueue:
+ 	destroy_workqueue(sgx_add_page_wq);
+@@ -356,6 +359,8 @@ static int sgx_drv_remove(struct platform_device *pdev)
+ 		return 0;
+ 	}
+ 
++	sgx_isolation_global_deinit();
++
+ 	misc_deregister(&sgx_dev);
+ 
+ 	destroy_workqueue(sgx_add_page_wq);
+diff --git a/sgx_user.h b/sgx_user.h
+index 50f0931..6d1ede1 100644
+--- a/sgx_user.h
++++ b/sgx_user.h
+@@ -80,6 +80,22 @@
+ #define SGX_IOC_ENCLAVE_PAGE_REMOVE \
+ 	_IOW(SGX_MAGIC, 0x0d, unsigned long)
+ 
++#define SGX_ISOLATION_MAGIC 0x12
++
++// isolation
++#define SGX_IOC_ENCLAVE_ISOLATION_ADD_BRIDGE \
++	_IOW(SGX_MAGIC, 0x0e, struct sgx_isolation_bridge_param)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_BEGIN \
++	_IOW(SGX_MAGIC, 0x0f, struct sgx_isolation_enclave_id_param)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_END \
++	_IO(SGX_MAGIC, 0x10)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_SETUP \
++	_IOW(SGX_MAGIC, 0x11, struct sgx_isolation_enclave_setup)
++
++
+ /* SGX leaf instruction return values */
+ #define SGX_SUCCESS			0
+ #define SGX_INVALID_SIG_STRUCT		1
+@@ -161,4 +177,21 @@ struct sgx_modification_param {
+ 	unsigned long flags;
+ };
+ 
++struct sgx_isolation_bridge_param {
++	__u64 encl_addr;
++	__u64 bridge_addr;
++	__u64 bridge_size;
++} __attribute__((__packed__));
++
++struct sgx_isolation_enclave_id_param {
++	__u64 encl_addr;
++} __attribute__((__packed__));
++
++struct sgx_isolation_enclave_setup {
++	__u64 encl_addr;
++	__u64 is_intel_enclave;
++	__u64 enclave_bridge;
++	__u64 signal_handler;
++} __attribute__((__packed__));
++
+ #endif /* _UAPI_ASM_X86_SGX_H */
+diff --git a/sgx_util.c b/sgx_util.c
+index 38013e2..0054ddf 100644
+--- a/sgx_util.c
++++ b/sgx_util.c
+@@ -59,6 +59,7 @@
+  */
+ 
+ #include "sgx.h"
++#include "sgx_isolation.h"
+ #include <linux/highmem.h>
+ #include <linux/shmem_fs.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0))
+@@ -354,6 +355,8 @@ static struct sgx_encl_page *sgx_do_fault(struct vm_area_struct *vma,
+ 		goto out;
+ 	}
+ 
++	sgx_isolation_added_page(encl, vma, entry->addr);
++
+ 	rc = 0;
+ 	sgx_test_and_clear_young(entry, encl);
+ out:

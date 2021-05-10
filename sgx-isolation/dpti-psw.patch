@@ -1,0 +1,649 @@
+diff --git a/Makefile b/Makefile
+index 5fb368a9..5708fd8c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -256,6 +256,10 @@ endif
+ rpm_psw_pkg: rpm_libsgx_pce_logic rpm_libsgx_qe3_logic rpm_sgx_aesm_service rpm_libsgx_epid rpm_libsgx_launch rpm_libsgx_quote_ex rpm_libsgx_uae_service rpm_libsgx_enclave_common rpm_libsgx_urts rpm_libsgx_ae_qe3 rpm_libsgx_dcap_default_qpl rpm_libsgx_dcap_pccs rpm_libsgx_dcap_ql rpm_libsgx_ae_qve
+ endif
+ 
++.PHONY: deb_psw_pkg_minimal
++deb_psw_pkg_minimal: deb_sgx_aesm_service deb_libsgx_epid deb_libsgx_launch deb_libsgx_quote_ex deb_libsgx_uae_service deb_libsgx_enclave_common deb_libsgx_urts
++	./linux/installer/common/local_repo_builder/local_repo_builder.sh debian build
++
+ .PHONY: rpm_local_repo
+ rpm_local_repo: rpm_psw_pkg
+ 	./linux/installer/common/local_repo_builder/local_repo_builder.sh rpm build
+diff --git a/buildenv.mk b/buildenv.mk
+index 331611d7..d390f905 100644
+--- a/buildenv.mk
++++ b/buildenv.mk
+@@ -65,7 +65,7 @@ OBJCOPY := objcopy
+ NIPX := .nipx
+ NIPD := .nipd
+ NIPRODT := .niprod
+-CC ?= gcc
++CC ?= gcc-10
+ 
+ # clean the content of 'INCLUDE' - this variable will be set by vcvars32.bat
+ # thus it will cause build error when this variable is used by our Makefile,
+diff --git a/common/inc/internal/enclave_creator.h b/common/inc/internal/enclave_creator.h
+index f2802698..88e1e044 100644
+--- a/common/inc/internal/enclave_creator.h
++++ b/common/inc/internal/enclave_creator.h
+@@ -83,6 +83,9 @@ public:
+     virtual int trim_range(uint64_t fromaddr, uint64_t toaddr) = 0;
+     virtual int trim_accept(uint64_t addr) = 0;
+     virtual int remove_range(uint64_t fromaddr, uint64_t numpages) = 0;
++    virtual int get_driver() const {
++        return 0;
++    }
+     // destructor
+     virtual ~EnclaveCreator() {};
+ };
+diff --git a/common/inc/sgx_urts.h b/common/inc/sgx_urts.h
+index 42b94690..2562f76f 100644
+--- a/common/inc/sgx_urts.h
++++ b/common/inc/sgx_urts.h
+@@ -132,6 +132,8 @@ sgx_status_t SGXAPI sgx_get_target_info(
+ 	const sgx_enclave_id_t enclave_id,
+ 	sgx_target_info_t* target_info);
+ 
++sgx_status_t SGXAPI sgx_isolation_add_bridge(const sgx_enclave_id_t enclave_id, uint8_t* start, size_t size);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/psw/urts/enclave.cpp b/psw/urts/enclave.cpp
+index 429a4fa7..7a4a8d5d 100644
+--- a/psw/urts/enclave.cpp
++++ b/psw/urts/enclave.cpp
+@@ -125,7 +125,7 @@ void CEnclave::destroy_uswitchless(void)
+ }
+ 
+ 
+-sgx_status_t CEnclave::initialize(const se_file_t& file,  CLoader &ldr, const uint64_t enclave_size, const uint32_t tcs_policy, const uint32_t enclave_version, const uint32_t tcs_min_pool)
++sgx_status_t CEnclave::initialize(const se_file_t& file,  CLoader &ldr, const uint64_t enclave_size, const uint32_t tcs_policy, const uint32_t enclave_version, const uint32_t tcs_min_pool, bool is_intel_enclave)
+ {
+     const secs_t& secs = ldr.get_secs();
+ 
+@@ -153,6 +153,7 @@ sgx_status_t CEnclave::initialize(const se_file_t& file,  CLoader &ldr, const ui
+     m_start_addr = (void*)ldr.get_start_addr();
+     m_size = enclave_size;
+     m_version = enclave_version;
++    m_is_intel_enclave = is_intel_enclave;
+ 
+     m_new_thread_event = se_event_init();
+     if(m_new_thread_event == NULL)
+diff --git a/psw/urts/enclave.h b/psw/urts/enclave.h
+index a006cdd7..3115f976 100644
+--- a/psw/urts/enclave.h
++++ b/psw/urts/enclave.h
+@@ -64,12 +64,13 @@ public:
+     uint32_t get_ref() { return m_ref; }
+     void mark_zombie()  { m_zombie = true; }
+     bool is_zombie() { return m_zombie; }
+-    sgx_status_t initialize(const se_file_t& file, CLoader &ldr, const uint64_t enclave_size, const uint32_t tcs_policy, const uint32_t enclave_version, const uint32_t tcs_min_pool);
++    sgx_status_t initialize(const se_file_t& file, CLoader &ldr, const uint64_t enclave_size, const uint32_t tcs_policy, const uint32_t enclave_version, const uint32_t tcs_min_pool, bool is_intel_enclave);
+     void add_thread(tcs_t * const tcs, bool is_unallocated);
+     void add_thread(CTrustThread * const trust_thread);
+     const debug_enclave_info_t* get_debug_info();
+     void set_dbg_flag(bool dbg_flag) { m_dbg_flag = dbg_flag; }
+     bool get_dbg_flag() { return m_dbg_flag; }
++    bool is_intel_enclave() { return m_is_intel_enclave; }
+     int set_extra_debug_info(secs_t& secs, CLoader &ldr);
+     //rdunlock is used in signal handler
+     void rdunlock() { se_rdunlock(&m_rwlock); }
+@@ -119,6 +120,7 @@ private:
+     bool                    m_first_ecall;
+     sgx_target_info_t       m_target_info;
+     size_t                  m_dynamic_tcs_list_size;
++    bool                    m_is_intel_enclave;
+ #ifdef SE_SIM    
+     void                    *m_global_data_sim_ptr;
+ #endif
+diff --git a/psw/urts/enclave_creator_hw.h b/psw/urts/enclave_creator_hw.h
+index 0cbfe6eb..97c9420f 100644
+--- a/psw/urts/enclave_creator_hw.h
++++ b/psw/urts/enclave_creator_hw.h
+@@ -42,6 +42,9 @@
+ #include "se_error_internal.h"
+ #include "se_lock.hpp"
+ #include "file.h"
++#include <sys/mman.h>
++#include <sys/types.h>
++
+ 
+ // hardware mode
+ class EnclaveCreatorHW : public EnclaveCreator
+@@ -64,6 +67,10 @@ public:
+     int trim_range(uint64_t fromaddr, uint64_t toaddr);
+     int trim_accept(uint64_t addr);
+     int remove_range(uint64_t fromaddr, uint64_t numpages);
++    virtual int get_driver() const {
++        return m_hdevice;
++    }
++
+ private:
+     virtual bool open_device();
+     virtual void close_device();
+diff --git a/psw/urts/enclave_creator_hw_com.cpp b/psw/urts/enclave_creator_hw_com.cpp
+index 28d10a44..11fd0814 100644
+--- a/psw/urts/enclave_creator_hw_com.cpp
++++ b/psw/urts/enclave_creator_hw_com.cpp
+@@ -40,6 +40,7 @@
+ #include "prd_css_util.h"
+ #include "se_memcpy.h"
+ #include <unistd.h>
++#include <sys/ioctl.h>
+ 
+ #define EDMM_ENABLE_BIT 0x1ULL
+ 
+@@ -49,8 +50,13 @@ bool EnclaveCreatorHW::use_se_hw() const
+ }
+ 
+ int EnclaveCreatorHW::initialize(sgx_enclave_id_t enclave_id)
+-{
+-    system_features_t info;
++{   
++
++    union __attribute__((aligned(4096))) {
++        system_features_t info;
++        char pad[4096];
++    };
++    
+     memset(&info, 0, sizeof(system_features_t));
+     info.system_feature_set[0] = (uint64_t)1 << SYS_FEATURE_MSb;
+ 
+diff --git a/psw/urts/linux/enclave_creator_hw.cpp b/psw/urts/linux/enclave_creator_hw.cpp
+index e4df9cf5..0adf200c 100644
+--- a/psw/urts/linux/enclave_creator_hw.cpp
++++ b/psw/urts/linux/enclave_creator_hw.cpp
+@@ -389,7 +389,7 @@ int EnclaveCreatorHW::remove_range(uint64_t fromaddr, uint64_t numpages)
+ 
+     return SGX_SUCCESS;
+ }
+- 
++
+ //EDMM is supported if and only if all of the following requirements are met:
+ //1. We operate in HW mode
+ //2. CPU has EDMM support
+diff --git a/psw/urts/linux/enter_enclave.S b/psw/urts/linux/enter_enclave.S
+index 88e8c97c..10c97f3f 100644
+--- a/psw/urts/linux/enter_enclave.S
++++ b/psw/urts/linux/enter_enclave.S
+@@ -32,6 +32,10 @@
+ 
+ #include "enter_enclave.h"
+ 
++#define SGX_ISOLATION_ENABLE
++
++/*#define SGX_ISOLATION_END_SYSCALL*/
++
+ 
+ /* int __morestack(const tcs_t *tcs, const int fn, const void *ocall_table, const void *ms, CTrustThread *trust_thread); */
+ .file "enter_enclave.S"
+@@ -53,6 +57,14 @@ DECLARE_GLOBAL_FUNC set_xsave_info
+     movl    %edx, (%xax)
+     ret
+ 
++/*extern "C" int enter_enclave(
++    const tcs_t *tcs(0),            rdi
++    const long fn(1),               rsi 
++    const void *ocall_table(2),     rdx
++    const void *ms(3),              rcx
++    CTrustThread *trust_thread(4),  r8
++    int driver(5)                   r9
++xx);*/
+ DECLARE_GLOBAL_FUNC __morestack
+ 
+ //__morestack:
+@@ -64,7 +76,16 @@ EENTER_PROLOG
+ #endif
+     mov frame_arg3, %xsi                        /* ms */
+ 
++    /* align stack */
++    mov %rsp, %rax
++    and $0xFFF, %rax
++    sub $0x1000, %rsp
++    sub %rax, %rsp
++    mov %rsp, isolaten_sp
++
+ .Ldo_eenter:
++    /*mov isolaten_sp, %rsp*/
++
+     # clean the upper bits of YMM registers
+     lea_symbol  g_clean_ymm, %xbx
+     movl (%xbx), %ecx
+@@ -73,11 +94,116 @@ EENTER_PROLOG
+     vzeroupper
+ 1:
+     mov frame_arg0, %xbx                        /* tcs addr */
++    mov %xbx, isolaten_ptr
+     lea_pic .Lasync_exit_pointer, %xcx          /* aep addr */
+-    mov $SE_EENTER, %xax                        /* EENTER leaf */
++    
++
++/* 
++ * ---------------------------------------------------------------------
++ * Function: enclave_entry
++ *      The entry point of the enclave.
++ *
++ * Registers:
++ *      XAX - TCS.CSSA
++ *      XBX - the address of a TCS
++ *      XCX - the address of the instruction following the EENTER
++ *      XDI - the reason of entering the enclave
++ *      XSI - the pointer to the marshalling structure
++ */
++/* 
++ * ----------------------------------------------------------------------
++ * Dispatch code according to CSSA and the reason of EENTER
++ *      eax >   0 - exception handler
++ *      edi >=  0 - ecall
++ *      edi == -1 - do_init_enclave
++ *      edi == -2 - oret
++ * Registers
++ *      No need to use any register during the dispatch
++ * ----------------------------------------------------------------------
++ */
++
++    
++    mov %rsi, %r12                               /* save ms */
++    mov %rdi, %r13                               /* save fn */
++    mov %rcx, %r14                               /* save fn */
++    mov isolaten_sp, %r15                        /* store the isolation start stack pointer */
++
++#if !defined(SGX_ISOLATION_ENABLE)
++    jmp .Leenter_bridge
++#endif
++    /* start isolation! */
++    mov $0x10, %rax                              /* ioctl */
++    mov frame_arg5, %rdi                         /* fd    */
++    mov $0x4008A40f, %rsi                        /* type = ISOLATION_BEGIN 0x40081203 = ISOLATION_END */    
++    lea isolaten_ptr, %rdx                        /* type = ISOLATION_BEGIN 0x40081203 = ISOLATION_END */ 
++
++    /*cmp $-1, %r13 
++    je .Leenter_bridge*/
++    /* All registers, except rcx and r11 (and the return value, rax), are preserved during the system call with syscall.  */
++    
++    jmp 2f
++    .align 0x1000
++    .fill 0xFFE, 1, 0x90
++2:
++    syscall
++
++    .align 0x1000
++.Leenter_bridge:
++    /* TODO RESTORE IN DRIVER */
++    /* AND JUMP AFTER AEP ENCLU */
++    mov %r12, %rsi
++    mov %r13, %rdi
++    mov %r14, %rcx
++    mov $SE_EENTER, %xax                         /* EENTER leaf */
+ 
+ .Leenter_inst:
+     ENCLU
++    
++#if defined(SGX_ISOLATION_ENABLE) && defined(SGX_ISOLATION_END_SYSCALL)
++    mov %rcx, %r15
++    mov %rax, %r14
++    mov %rsi, %r12                               /* save ocall ms */
++    mov %rdi, %r13                               /* save ocall index */
++
++    mov $0x10, %rax                              /* ioctl */
++    mov frame_arg5, %rdi                         /* fd    */
++    mov $0x0000A410, %rsi                         /* type = ISOLATION_BEGIN   0x40081203 = ISOLATION_END */ 
++   
++    /* All registers, except rcx and r11 (and the return value, rax), are preserved during the system call with syscall.  */
++    syscall
++
++    mov %r12, %rsi
++    mov %r13, %rdi
++    mov %r14, %rax
++    mov %r15, %rcx
++
++#endif
++
++    jmp .Leenter_bridge_return
++
++.Lasync_exit_pointer:
++    ENCLU
++    
++    /* this enclu never returns */
++
++    .fill 0xFE5, 1, 0x90
++    .align 0x1000
++
++.Leenter_bridge_return:
++    nop
++    .align 0x1000
++
++
++/* ALL GPRs cleares except, except xax, xbx, xdi and xsi */
++/* non null:    rax 
++                rbx 
++                rcx 
++                rdi 
++                rsi */
++
++/* not used anymore: */
++/* rax */
++/* rbx */
+ 
+ /* 
+  * at this point, we may have returned due to a normal EEXIT,
+@@ -130,10 +256,11 @@ EENTER_PROLOG
+ .Leret:
+ 
+ .Loret:
++
+     EENTER_EPILOG
++    /* this returns */
++
+ 
+-.Lasync_exit_pointer:
+-    ENCLU
+ 
+ .size __morestack, .-__morestack
+ 
+@@ -150,6 +277,10 @@ DECLARE_GLOBAL_FUNC get_eretp
+     lea_pic .Leret, %xax
+     ret
+ 
++DECLARE_GLOBAL_FUNC get_enclave_bridge
++    lea_pic .Leenter_bridge, %xax
++    ret
++
+ /*
+  * function stack_sticker is the wrapper of ocall,
+  * before call ocall, update the ret address and frame pointer (BP) on the stack
+diff --git a/psw/urts/linux/enter_enclave.h b/psw/urts/linux/enter_enclave.h
+index 02e12b75..cdeb55a0 100644
+--- a/psw/urts/linux/enter_enclave.h
++++ b/psw/urts/linux/enter_enclave.h
+@@ -67,13 +67,14 @@ mov     %xbx, -2 * SE_WORDSIZE(%xbp)
+ mov     %xsi, -3 * SE_WORDSIZE(%xbp)
+ mov     %xdi, -4 * SE_WORDSIZE(%xbp)
+ #else /* __x86_64__ */
+-sub     $(12 * SE_WORDSIZE), %xsp      /* for xsave, params, and non-volatile GPRs */
+-mov     %xdi, -10 * SE_WORDSIZE(%xbp)
+-mov     %xsi,  -9 * SE_WORDSIZE(%xbp)
+-mov     %rdx,  -8 * SE_WORDSIZE(%xbp)
+-mov     %rcx,  -7 * SE_WORDSIZE(%xbp)
+-mov     %r8,   -6 * SE_WORDSIZE(%xbp)
+-mov     %xbx, -11 * SE_WORDSIZE(%xbp)
++sub     $(15 * SE_WORDSIZE), %xsp      /* for xsave, params, and non-volatile GPRs */
++mov     %xdi, -11 * SE_WORDSIZE(%xbp)
++mov     %xsi, -10 * SE_WORDSIZE(%xbp)
++mov     %rdx,  -9 * SE_WORDSIZE(%xbp)
++mov     %rcx,  -8 * SE_WORDSIZE(%xbp)
++mov     %r8,   -7 * SE_WORDSIZE(%xbp)
++mov     %r9,   -6 * SE_WORDSIZE(%xbp)
++mov     %xbx, -12 * SE_WORDSIZE(%xbp)
+ mov     %r12,  -5 * SE_WORDSIZE(%xbp)
+ mov     %r13,  -4 * SE_WORDSIZE(%xbp)
+ mov     %r14,  -3 * SE_WORDSIZE(%xbp)
+@@ -118,14 +119,13 @@ mov     -SE_WORDSIZE*2(%xbp),  %xbx
+ mov     -SE_WORDSIZE*3(%xbp),  %xsi
+ mov     -SE_WORDSIZE*4(%xbp),  %xdi
+ #else
+-mov     -SE_WORDSIZE*11(%xbp),  %xbx
+-mov     -SE_WORDSIZE*10(%xbp),  %xdi
+-mov     -SE_WORDSIZE*9(%xbp),   %xsi
+-mov     -SE_WORDSIZE*5(%rbp),   %r12
+-mov     -SE_WORDSIZE*4(%rbp),   %r13
+-mov     -SE_WORDSIZE*3(%rbp),   %r14
+-mov     -SE_WORDSIZE*2(%rbp),   %r15
+-
++mov     -SE_WORDSIZE*12(%xbp),  %xbx
++mov     -SE_WORDSIZE*11(%xbp),  %xdi
++mov     -SE_WORDSIZE*10(%xbp),   %xsi
++mov     -SE_WORDSIZE*6(%rbp),   %r12
++mov     -SE_WORDSIZE*5(%rbp),   %r13
++mov     -SE_WORDSIZE*4(%rbp),   %r14
++mov     -SE_WORDSIZE*3(%rbp),   %r15
+ #endif
+ /* don't need recover rdi, rsi, rdx, rcx */
+ mov     %xbp, %xsp
+@@ -140,12 +140,17 @@ ret
+ #define frame_arg2  4*SE_WORDSIZE(%ebp)
+ #define frame_arg3  5*SE_WORDSIZE(%ebp)
+ #define frame_arg4  6*SE_WORDSIZE(%ebp)
++#define frame_arg5  7*SE_WORDSIZE(%ebp)
+ #elif defined(__x86_64__)
+-#define frame_arg0  -10*SE_WORDSIZE(%rbp)
+-#define frame_arg1  -9*SE_WORDSIZE(%rbp)
+-#define frame_arg2  -8*SE_WORDSIZE(%rbp)
+-#define frame_arg3  -7*SE_WORDSIZE(%rbp)
+-#define frame_arg4  -6*SE_WORDSIZE(%rbp)
++#define frame_arg0  -11*SE_WORDSIZE(%rbp) /* rdi */
++#define frame_arg1  -10*SE_WORDSIZE(%rbp)  /* rsi */
++#define frame_arg2  -9*SE_WORDSIZE(%rbp)  /* rdx */
++#define frame_arg3  -8*SE_WORDSIZE(%rbp)  /* rcx */
++#define frame_arg4  -7*SE_WORDSIZE(%rbp)  /* r8  */
++#define frame_arg5  -6*SE_WORDSIZE(%rbp)  /* r9  */
++
++#define isolaten_sp  -13*SE_WORDSIZE(%rbp) 
++#define isolaten_ptr  -14*SE_WORDSIZE(%rbp) 
+ #else
+ #   error unknown platform
+ #endif
+diff --git a/psw/urts/linux/isgx_user.h b/psw/urts/linux/isgx_user.h
+index 007dfd86..01e6e3e7 100644
+--- a/psw/urts/linux/isgx_user.h
++++ b/psw/urts/linux/isgx_user.h
+@@ -119,6 +119,21 @@ enum sgx_page_flags {
+ #define SGX_IOC_ENCLAVE_PAGE_REMOVE \
+ 	_IOW(SGX_MAGIC, 0x0d, unsigned long)
+ 
++
++// isolation
++#define SGX_IOC_ENCLAVE_ISOLATION_ADD_BRIDGE \
++	_IOW(SGX_MAGIC, 0x0e, struct sgx_isolation_bridge_param)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_BEGIN \
++	_IOW(SGX_MAGIC, 0x0f, struct sgx_isolation_enclave_id_param)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_END \
++	_IO(SGX_MAGIC, 0x10)
++
++#define SGX_IOC_ENCLAVE_ISOLATION_SETUP \
++	_IOW(SGX_MAGIC, 0x11, struct sgx_isolation_enclave_setup)
++
++
+ //Note: SGX_IOC_ENCLAVE_CREATE is the same for in-kernel except that it returns a file handle for in-kernel
+ #define SGX_IOC_ENCLAVE_ADD_PAGES_IN_KERNEL \
+ 	_IOWR(SGX_MAGIC, 0x01, struct sgx_enclave_add_pages_in_kernel)
+@@ -283,4 +298,21 @@ struct sgx_modification_param {
+ 	unsigned long flags;
+ };
+ 
++struct sgx_isolation_bridge_param {
++	__u64 encl_addr;
++	__u64 bridge_addr;
++	__u64 bridge_size;
++} __attribute__((__packed__));
++
++struct sgx_isolation_enclave_id_param {
++	__u64 encl_addr;
++} __attribute__((__packed__));
++
++struct sgx_isolation_enclave_setup {
++	__u64 encl_addr;
++	__u64 is_intel_enclave;
++	__u64 enclave_bridge;
++	__u64 signal_handler;
++} __attribute__((__packed__));
++
+ #endif /* _UAPI_ASM_X86_SGX_H */
+diff --git a/psw/urts/linux/sig_handler.cpp b/psw/urts/linux/sig_handler.cpp
+index 2882cb45..137ae123 100644
+--- a/psw/urts/linux/sig_handler.cpp
++++ b/psw/urts/linux/sig_handler.cpp
+@@ -40,7 +40,9 @@
+ #include <signal.h>
+ #include <string.h>
+ #include <errno.h>
+-
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/mman.h>
+ 
+ typedef struct _ecall_param_t
+ {
+@@ -64,7 +66,7 @@ typedef struct _ecall_param_t
+  *         ^                     ^
+  *         | <-rbp               | <-param4
+  */
+-#define ECALL_PARAM (reinterpret_cast<ecall_param_t*>(context->uc_mcontext.gregs[REG_RBP] - 10 * 8))
++#define ECALL_PARAM (reinterpret_cast<ecall_param_t*>(context->uc_mcontext.gregs[REG_RBP] - 11 * 8))
+ #else
+ #define REG_XIP REG_EIP
+ #define REG_XAX REG_EAX
+@@ -88,11 +90,12 @@ static struct sigaction g_old_sigact[_NSIG];
+ 
+ void reg_sig_handler();
+ 
+-void sig_handler(int signum, siginfo_t* siginfo, void *priv)
+-{
++void __attribute__((aligned(0x1000))) sig_handler(int signum, siginfo_t* siginfo, void *priv)
++{   
+     SE_TRACE(SE_TRACE_DEBUG, "signal handler is triggered\n");
+     ucontext_t* context = reinterpret_cast<ucontext_t *>(priv);
+     unsigned int *xip = reinterpret_cast<unsigned int *>(context->uc_mcontext.gregs[REG_XIP]);
++
+     size_t xax = context->uc_mcontext.gregs[REG_XAX];
+ #ifndef NDEBUG
+     /* `xbx' is only used in assertions. */
+@@ -220,24 +223,44 @@ void reg_sig_handler()
+ //trust_thread is saved at stack for ocall.
+ #define enter_enclave __morestack
+ 
+-extern "C" int enter_enclave(const tcs_t *tcs, const long fn, const void *ocall_table, const void *ms, CTrustThread *trust_thread);
++extern "C" int enter_enclave(const tcs_t *tcs, const long fn, const void *ocall_table, const void *ms, CTrustThread *trust_thread, int driver);
++
++// get the bridge section and allow it as bridge
++// extern char *__start_bridge_code;
++// extern char *__stop_bridge_code;
++
++
++extern "C" void *get_enclave_bridge();
+ 
+ 
+ int do_ecall(const int fn, const void *ocall_table, const void *ms, CTrustThread *trust_thread)
+ {
+     int status = SGX_ERROR_UNEXPECTED;
+-
+-#ifdef SE_SIM
+     CEnclave* enclave = trust_thread->get_enclave();
++#ifdef SE_SIM
++    
++
+     //check if it is current pid, it is to simulate fork() scenario on HW
+     sgx_enclave_id_t eid = enclave->get_enclave_id();
+     if((pid_t)(eid >> 32) != getpid())
+         return SGX_ERROR_ENCLAVE_LOST;
+ #endif
+-
+     tcs_t *tcs = trust_thread->get_tcs();
+ 
+-    status = enter_enclave(tcs, fn, ocall_table, ms, trust_thread);
++    if (fn == ECMD_INIT_ENCLAVE) {
++        // TODO move before first ecall ... this is if is just a shortcut for the prototype
++        struct sgx_isolation_enclave_setup setup;
++        setup.encl_addr        = (uint64_t)enclave->get_start_address();
++        setup.is_intel_enclave = enclave->is_intel_enclave();
++        setup.enclave_bridge   = (uint64_t)get_enclave_bridge();
++        setup.signal_handler   = (uint64_t)&sig_handler;
++
++        ioctl(get_enclave_creator()->get_driver(), SGX_IOC_ENCLAVE_ISOLATION_SETUP, &setup);
++
++    }
++    
++    //
++    status = enter_enclave(tcs, fn, ocall_table, ms, trust_thread, get_enclave_creator()->get_driver());
+ 
+     return status;
+ }
+diff --git a/psw/urts/linux/urts.cpp b/psw/urts/linux/urts.cpp
+index c2a23594..35bf1b50 100644
+--- a/psw/urts/linux/urts.cpp
++++ b/psw/urts/linux/urts.cpp
+@@ -299,3 +299,23 @@ extern "C" sgx_status_t sgx_get_metadata(const char* enclave_file, metadata_t *m
+     close(fd);
+     return SGX_SUCCESS;
+ }
++
++
++extern "C"
++sgx_status_t sgx_isolation_add_bridge(const sgx_enclave_id_t enclave_id, uint8_t* start, size_t size) {
++
++     CEnclave* enclave = CEnclavePool::instance()->ref_enclave(enclave_id);
++
++    //If we failed to reference enclave, there is no corresponding enclave instance, so we didn't increase the enclave.m_ref;
++    if(!enclave)
++        return SGX_ERROR_INVALID_ENCLAVE_ID;
++
++    {
++        get_enclave_creator()->isolation_add_bridge(enclave, start, size);
++    }
++    {
++        //This solution seems more readable and easy to validate, but low performace
++        CEnclavePool::instance()->unref_enclave(enclave);
++    }
++    return SGX_SUCCESS;
++}
+\ No newline at end of file
+diff --git a/psw/urts/linux/urts.lds b/psw/urts/linux/urts.lds
+index 44897f21..666f4167 100644
+--- a/psw/urts/linux/urts.lds
++++ b/psw/urts/linux/urts.lds
+@@ -18,6 +18,7 @@
+         sgx_create_enclave_from_buffer_ex;
+         sgx_set_switchless_itf;
+         sgx_get_metadata;
++        sgx_isolation_add_bridge;
+     local:
+         *;
+ };
+diff --git a/psw/urts/linux/urts_internal.lds b/psw/urts/linux/urts_internal.lds
+index b2a0f716..4f8613cf 100644
+--- a/psw/urts/linux/urts_internal.lds
++++ b/psw/urts/linux/urts_internal.lds
+@@ -21,6 +21,7 @@
+         sgx_get_metadata;
+         sgx_set_switchless_itf;
+         init_get_launch_token;
++        sgx_isolation_add_bridge;
+     local:
+         *;
+ };
+diff --git a/psw/urts/urts_com.h b/psw/urts/urts_com.h
+index 8c37e2c7..b447575c 100644
+--- a/psw/urts/urts_com.h
++++ b/psw/urts/urts_com.h
+@@ -287,7 +287,9 @@ static int __create_enclave(BinParser &parser,
+                               metadata->enclave_size,
+                               metadata->tcs_policy,
+                               enclave_version,
+-                              metadata->tcs_min_pool);
++                              metadata->tcs_min_pool,
++                              0x8086 == metadata->enclave_css.header.module_vendor
++                              );
+ 
+     if (ret != SGX_SUCCESS)
+     {
+diff --git a/sdk/simulation/urtssim/urts_deploy.c b/sdk/simulation/urtssim/urts_deploy.c
+index 72ac1fbc..fd14ce87 100644
+--- a/sdk/simulation/urtssim/urts_deploy.c
++++ b/sdk/simulation/urtssim/urts_deploy.c
+@@ -93,3 +93,9 @@ sgx_status_t sgx_get_metadata()
+     printf("Please use the correct uRTS library from PSW package.\n");
+     return SGX_ERROR_UNEXPECTED;
+ }
++
++sgx_status_t sgx_isolation_add_bridge()
++{
++    printf("Please use the correct uRTS library from PSW package.\n");
++    return SGX_ERROR_UNEXPECTED;
++}
