@@ -35,45 +35,45 @@
  *
  */
  /** Page is present */
-#define SANDBOXING_PAGE_BIT_PRESENT 0
+#define DPTI_PAGE_BIT_PRESENT 0
 /** Page is writeable */
-#define SANDBOXING_PAGE_BIT_RW 1
+#define DPTI_PAGE_BIT_RW 1
 /** Page is userspace addressable */
-#define SANDBOXING_PAGE_BIT_USER 2
+#define DPTI_PAGE_BIT_USER 2
 /** Page write through */
-#define SANDBOXING_PAGE_BIT_PWT 3
+#define DPTI_PAGE_BIT_PWT 3
 /** Page cache disabled */
-#define SANDBOXING_PAGE_BIT_PCD 4
+#define DPTI_PAGE_BIT_PCD 4
 /** Page was accessed (raised by CPU) */
-#define SANDBOXING_PAGE_BIT_ACCESSED 5
+#define DPTI_PAGE_BIT_ACCESSED 5
 /** Page was written to (raised by CPU) */
-#define SANDBOXING_PAGE_BIT_DIRTY 6
+#define DPTI_PAGE_BIT_DIRTY 6
 /** 4 MB (or 2MB) page */
-#define SANDBOXING_PAGE_BIT_PSE 7
+#define DPTI_PAGE_BIT_PSE 7
 /** PAT (only on 4KB pages) */
-#define SANDBOXING_PAGE_BIT_PAT 7
+#define DPTI_PAGE_BIT_PAT 7
 /** Global TLB entry PPro+ */
-#define SANDBOXING_PAGE_BIT_GLOBAL 8
+#define DPTI_PAGE_BIT_GLOBAL 8
 /** Available for programmer */
-#define SANDBOXING_PAGE_BIT_SOFTW1 9
+#define DPTI_PAGE_BIT_SOFTW1 9
 /** Available for programmer */
-#define SANDBOXING_PAGE_BIT_SOFTW2 10
+#define DPTI_PAGE_BIT_SOFTW2 10
 /** Available for programmer */
-#define SANDBOXING_PAGE_BIT_SOFTW3 11
+#define DPTI_PAGE_BIT_SOFTW3 11
 /** PAT (on 2MB or 1GB pages) */
-#define SANDBOXING_PAGE_BIT_PAT_LARGE 12
+#define DPTI_PAGE_BIT_PAT_LARGE 12
 /** Available for programmer */
-#define SANDBOXING_PAGE_BIT_SOFTW4 58
+#define DPTI_PAGE_BIT_SOFTW4 58
 /** Protection Keys, bit 1/4 */
-#define SANDBOXING_PAGE_BIT_PKEY_BIT0 59
+#define DPTI_PAGE_BIT_PKEY_BIT0 59
 /** Protection Keys, bit 2/4 */
-#define SANDBOXING_PAGE_BIT_PKEY_BIT1 60
+#define DPTI_PAGE_BIT_PKEY_BIT1 60
 /** Protection Keys, bit 3/4 */
-#define SANDBOXING_PAGE_BIT_PKEY_BIT2 61
+#define DPTI_PAGE_BIT_PKEY_BIT2 61
 /** Protection Keys, bit 4/4 */
-#define SANDBOXING_PAGE_BIT_PKEY_BIT3 62
+#define DPTI_PAGE_BIT_PKEY_BIT3 62
 /** No execute: only valid after cpuid check */
-#define SANDBOXING_PAGE_BIT_NX 63
+#define DPTI_PAGE_BIT_NX 63
 /** @} */
 
 /**
@@ -88,7 +88,7 @@
  * Global variable that holds the max number of syscalls.
  * Filled by sandboxing_init.
  */
-int sandboxing_max_num_syscalls;
+int dpti_max_num_syscalls;
 
  /**
   * Initializes (and acquires) Sandbox kernel module
@@ -96,13 +96,13 @@ int sandboxing_max_num_syscalls;
   * @return 0 Initialization was successful
   * @return -1 Initialization failed
   */
-int sandboxing_init();
+int dpti_init();
 
 /**
  * Releases Sandbox kernel module
  *
  */
-void sandboxing_cleanup();
+void dpti_cleanup();
 
 /**
  * Resolves the page-table entries of all levels for a virtual address of a given process.
@@ -112,21 +112,28 @@ void sandboxing_cleanup();
  *
  * @return A structure containing the page-table entries of all levels.
  */
-sandbox_entry_t sandboxing_resolve(void*, pid_t);
+dpti_entry_t dpti_resolve(void*, pid_t);
 
 /**
  * Retrieves the maxium number of syscalls the system provides.
  *
  * @return The maximum number of syscalls provided by the system as an int.
  */
-int sandboxing_get_max_num_syscalls(void);
+int dpti_get_max_num_syscalls(void);
 
 /**
  * Prints the filters stored in the kernel.
  *
  * @return 0
  */
-int sandboxing_print_filters_kernel(void);
+int dpti_print_filters_kernel(void);
+
+/**
+ * Requests that the kernel logs filter violations instead of killing the application.
+ *
+ * @return void
+ */
+void dpti_request_violation_logging(void);
 
 /**
  * Prints the filters in userspace.
@@ -134,7 +141,7 @@ int sandboxing_print_filters_kernel(void);
  *
  * @return 0
  */
-void sandboxing_print_filters_userspace(filter_info_t *filters, int nr);
+void dpti_print_filters_userspace(filter_info_t *filters, int nr);
 
 /**
  * Installs the provided syscall filters.
@@ -143,7 +150,7 @@ void sandboxing_print_filters_userspace(filter_info_t *filters, int nr);
  *
  * @return 1 for success, 0 for failure
  */
-int sandboxing_install_filters(filter_info_t *filters);
+int dpti_install_filters(filter_info_t *filters);
 
 /**
  * Clear userspace syscall filter list, should be called after installing the filters in the kernel.
@@ -152,14 +159,14 @@ int sandboxing_install_filters(filter_info_t *filters);
  *
  * @return void
  */
-void sandboxing_clear_filters(filter_info_t **filters);
+void dpti_clear_filters(filter_info_t **filters);
 
 /**
  * Creates an empty filter_info_t for all syscalls.
  *
  * @return filter_info_t* Allocated memory for the filters
  */
-filter_info_t* sandboxing_create_filters(void);
+filter_info_t* dpti_create_filters(void);
 
 /**
  * Adds a simple syscall filter rule to the provided syscall filters.
@@ -169,7 +176,7 @@ filter_info_t* sandboxing_create_filters(void);
  *
  * @return void
  */
-void sandboxing_add_syscall_filter_rule(filter_info_t *filters, int nr);
+void dpti_add_filter_rule(filter_info_t *filters, int nr);
 
 /**
  * Adds a integer argument syscall filter rule to the provided syscall filters.
@@ -182,7 +189,7 @@ void sandboxing_add_syscall_filter_rule(filter_info_t *filters, int nr);
  *
  * @return int -1 on failure, 0 on success
  */
-int sandboxing_add_syscall_argument_filter_rule_int(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, int argument);
+int dpti_add_filter_rule_int(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, int argument);
 
 /**
  * Adds a string argument syscall filter rule to the provided syscall filters.
@@ -195,9 +202,9 @@ int sandboxing_add_syscall_argument_filter_rule_int(filter_info_t *filters, int 
  *
  * @return int -1 on failure, 0 on success
  */
-int sandboxing_add_syscall_argument_filter_rule_string(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, char *argument);
+int dpti_add_filter_rule_string(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, char *argument);
 
-#define SANDBOXING_PAGE_PRESENT 1
+#define DPTI_PAGE_PRESENT 1
 
 /**
  * Struct to access the fields of the PGD
@@ -217,26 +224,26 @@ typedef struct {
   size_t reserved_1 : 12;
   size_t ignored_1 : 11;
   size_t execution_disabled : 1;
-} sandboxing_pgd_t;
+} dpti_pgd_t;
 #pragma pack(pop)
 
 
 /**
  * Struct to access the fields of the P4D
  */
-typedef sandboxing_pgd_t sandboxing_p4d_t;
+typedef dpti_pgd_t dpti_p4d_t;
 
 
 /**
  * Struct to access the fields of the PUD
  */
-typedef sandboxing_pgd_t sandboxing_pud_t;
+typedef dpti_pgd_t dpti_pud_t;
 
 
 /**
  * Struct to access the fields of the PMD
  */
-typedef sandboxing_pgd_t sandboxing_pmd_t;
+typedef dpti_pgd_t dpti_pmd_t;
 
 
 /**
@@ -260,7 +267,7 @@ typedef struct {
   size_t reserved_1 : 12;
   size_t ignored_1 : 11;
   size_t execution_disabled : 1;
-} sandboxing_pmd_large_t;
+} dpti_pmd_large_t;
 #pragma pack(pop)
 
 /**
@@ -282,7 +289,7 @@ typedef struct {
   size_t reserved_1 : 12;
   size_t ignored_1 : 11;
   size_t execution_disabled : 1;
-} sandboxing_pte_t;
+} dpti_pte_t;
 #pragma pack(pop)
 
  /** @} */
@@ -296,12 +303,12 @@ typedef struct {
  */
 
  /**
-  * Pretty prints a sandbox_entry_t struct.
+  * Pretty prints a dpti_entry_t struct.
   *
-  * @param[in] entry A sandbox_entry_t struct
+  * @param[in] entry A dpti_entry_t struct
   *
   */
-void sandboxing_print_entry_t(sandbox_entry_t entry);
+void dpti_print_entry_t(dpti_entry_t entry);
 
 /**
  * Pretty prints a page-table entry.
@@ -309,7 +316,7 @@ void sandboxing_print_entry_t(sandbox_entry_t entry);
  * @param[in] entry A page-table entry
  *
  */
-void sandboxing_print_entry(size_t entry);
+void dpti_print_entry(size_t entry);
 
 /**
  * Prints a single line of the pretty-print representation of a page-table entry.
@@ -318,7 +325,7 @@ void sandboxing_print_entry(size_t entry);
  * @param[in] line The line to print (0 to 3)
  *
  */
-void sandboxing_print_entry_line(size_t entry, int line);
+void dpti_print_entry_line(size_t entry, int line);
 
 /** @} */
 

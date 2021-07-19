@@ -9,21 +9,21 @@
 #include <sys/mman.h>
 
 
-#define SANDBOXING_COLOR_RED     "\x1b[31m"
+#define DPTI_COLOR_RED     "\x1b[31m"
 #define SANDBOXING_COLOR_GREEN   "\x1b[32m"
-#define SANDBOXING_COLOR_RESET   "\x1b[0m"
+#define DPTI_COLOR_RESET   "\x1b[0m"
 
 
-static int sandboxing_fd;
+static int dpti_fd;
 
 // ---------------------------------------------------------------------------
-#define SANDBOXING_B(val, bit) (!!((val) & (1ull << (bit))))
+#define DPTI_B(val, bit) (!!((val) & (1ull << (bit))))
 
-#define SANDBOXING_PRINT_B(fmt, bit)                                                \
+#define DPTI_PRINT_B(fmt, bit)                                                \
   if ((bit)) {                                                                 \
     printf(SANDBOXING_COLOR_GREEN);                                                       \
     printf((fmt), (bit));                                                      \
-    printf(SANDBOXING_COLOR_RESET);                                                       \
+    printf(DPTI_COLOR_RESET);                                                       \
   } else {                                                                     \
     printf((fmt), (bit));                                                      \
   }                                                                            \
@@ -31,88 +31,88 @@ static int sandboxing_fd;
 
 
 // ---------------------------------------------------------------------------
-void sandboxing_print_entry_line(size_t entry, int line) {
+void dpti_print_entry_line(size_t entry, int line) {
   if (line == 0 || line == 3) printf("+--+------------------+-+-+-+-+-+-+-+-+--+--+-+-+-+\n");
   if (line == 1) printf("|NX|       PFN        |H|?|?|?|G|S|D|A|UC|WT|U|W|P|\n");
   if (line == 2) {
     printf("|");
-    SANDBOXING_PRINT_B(" %d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_NX));
+    DPTI_PRINT_B(" %d", DPTI_B(entry, DPTI_PAGE_BIT_NX));
     printf(" %16p |", (void*)((entry >> 12) & ((1ull << 40) - 1)));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_PAT_LARGE));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_SOFTW3));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_SOFTW2));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_SOFTW1));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_GLOBAL));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_PSE));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_DIRTY));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_ACCESSED));
-    SANDBOXING_PRINT_B(" %d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_PCD));
-    SANDBOXING_PRINT_B(" %d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_PWT));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_USER));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_RW));
-    SANDBOXING_PRINT_B("%d", SANDBOXING_B(entry, SANDBOXING_PAGE_BIT_PRESENT));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_PAT_LARGE));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_SOFTW3));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_SOFTW2));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_SOFTW1));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_GLOBAL));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_PSE));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_DIRTY));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_ACCESSED));
+    DPTI_PRINT_B(" %d", DPTI_B(entry, DPTI_PAGE_BIT_PCD));
+    DPTI_PRINT_B(" %d", DPTI_B(entry, DPTI_PAGE_BIT_PWT));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_USER));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_RW));
+    DPTI_PRINT_B("%d", DPTI_B(entry, DPTI_PAGE_BIT_PRESENT));
     printf("\n");
   }
 }
 
 
 // ---------------------------------------------------------------------------
-void sandboxing_print_entry(size_t entry) {
+void dpti_print_entry(size_t entry) {
   int i = 0;
   for (i = 0; i < 4; i++) {
-    sandboxing_print_entry_line(entry, i);
+    dpti_print_entry_line(entry, i);
   }
 }
 
 // ---------------------------------------------------------------------------
-void sandboxing_print_entry_t(sandbox_entry_t entry) {
-  if (entry.valid & SANDBOX_VALID_MASK_PGD) {
+void dpti_print_entry_t(dpti_entry_t entry) {
+  if (entry.valid & DPTI_VALID_MASK_PGD) {
     printf("PGD of address\n");
-    sandboxing_print_entry(entry.pgd);
+    dpti_print_entry(entry.pgd);
   }
-  if (entry.valid & SANDBOX_VALID_MASK_P4D) {
+  if (entry.valid & DPTI_VALID_MASK_P4D) {
     printf("P4D of address\n");
-    sandboxing_print_entry(entry.p4d);
+    dpti_print_entry(entry.p4d);
   }
-  if (entry.valid & SANDBOX_VALID_MASK_PUD) {
+  if (entry.valid & DPTI_VALID_MASK_PUD) {
     printf("PUD of address\n");
-    sandboxing_print_entry(entry.pud);
+    dpti_print_entry(entry.pud);
   }
-  if (entry.valid & SANDBOX_VALID_MASK_PMD) {
+  if (entry.valid & DPTI_VALID_MASK_PMD) {
     printf("PMD of address\n");
-    sandboxing_print_entry(entry.pmd);
+    dpti_print_entry(entry.pmd);
   }
-  if (entry.valid & SANDBOX_VALID_MASK_PTE) {
+  if (entry.valid & DPTI_VALID_MASK_PTE) {
     printf("PTE of address\n");
-    sandboxing_print_entry(entry.pte);
+    dpti_print_entry(entry.pte);
   }
 }
 
 // ---------------------------------------------------------------------------
-sandbox_entry_t sandboxing_resolve(void* address, pid_t pid) {
-  sandbox_entry_t vm;
+dpti_entry_t dpti_resolve(void* address, pid_t pid) {
+  dpti_entry_t vm;
   memset(&vm, 0, sizeof(vm));
   vm.vaddr = (size_t)address;
   vm.pid = (size_t)pid;
-  ioctl(sandboxing_fd, SANDBOX_IOCTL_CMD_VM_RESOLVE, (size_t)&vm);
+  ioctl(dpti_fd, DPTI_IOCTL_CMD_VM_RESOLVE, (size_t)&vm);
   
   return vm;
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_get_max_num_syscalls(void) {
-  return (int) ioctl(sandboxing_fd, SANDBOX_IOCTL_CMD_GET_NUM_SYSCALLS, 0);
+int dpti_get_max_num_syscalls(void) {
+  return (int) ioctl(dpti_fd, DPTI_IOCTL_CMD_GET_NUM_SYSCALLS, 0);
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_print_filters_kernel(void) {
-  return (int) ioctl(sandboxing_fd, SANDBOX_IOCTL_CMD_PRINT_FILTERS, 0);
+int dpti_print_filters_kernel(void) {
+  return (int) ioctl(dpti_fd, DPTI_IOCTL_CMD_PRINT_FILTERS, 0);
 }
 
 // ---------------------------------------------------------------------------
-void sandboxing_print_filters_userspace(filter_info_t *filters, int nr) {
+void dpti_print_filters_userspace(filter_info_t *filters, int nr) {
   if(!filters) {
-    fprintf(stderr, SANDBOXING_COLOR_RED "[-]" SANDBOXING_COLOR_RESET "Error: No memory for filters was allocated.\n");
+    fprintf(stderr, DPTI_COLOR_RED "[-]" DPTI_COLOR_RESET "Error: No memory for filters was allocated.\n");
     return;
   }
 
@@ -141,13 +141,18 @@ void sandboxing_print_filters_userspace(filter_info_t *filters, int nr) {
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_install_filters(filter_info_t* filters) {
-  return (int) ioctl(sandboxing_fd, SANDBOX_IOCTL_CMD_INSTALL_FILTER, (size_t)filters);
+void dpti_request_violation_logging(void) {
+  (void) ioctl(dpti_fd, DPTI_IOCTL_CMD_REQUEST_VIOLATION_LOGGING, 0);
 }
 
 // ---------------------------------------------------------------------------
-void sandboxing_clear_filters(filter_info_t **filters) {
-  for(int i=0; i<sandboxing_max_num_syscalls; i++) {
+int dpti_install_filters(filter_info_t* filters) {
+  return (int) ioctl(dpti_fd, DPTI_IOCTL_CMD_INSTALL_FILTER, (size_t)filters);
+}
+
+// ---------------------------------------------------------------------------
+void dpti_clear_filters(filter_info_t **filters) {
+  for(int i=0; i<dpti_max_num_syscalls; i++) {
     filter_info_t *filter = &((*filters)[i]);
     for(int i=0; i<MAX_ARGUMENT_NUMBER; i++) {
       argument_t *arg = &filter->arg[i];
@@ -165,16 +170,16 @@ void sandboxing_clear_filters(filter_info_t **filters) {
       arg->type = UNDEF;
     }
   }
-  memset(*filters, 0, sizeof(filter_info_t) * sandboxing_max_num_syscalls);
+  memset(*filters, 0, sizeof(filter_info_t) * dpti_max_num_syscalls);
   free(*filters);
   *filters = NULL;
 }
 
 // ---------------------------------------------------------------------------
-filter_info_t* sandboxing_create_filters(void) {
-  filter_info_t *filters = (filter_info_t*) calloc(sandboxing_max_num_syscalls, sizeof(filter_info_t));
+filter_info_t* dpti_create_filters(void) {
+  filter_info_t *filters = (filter_info_t*) calloc(dpti_max_num_syscalls, sizeof(filter_info_t));
   if(!filters) {
-    fprintf(stderr, SANDBOXING_COLOR_RED "[-]" SANDBOXING_COLOR_RESET "Error: Could not allocate memory for filters, terminating.\n");
+    fprintf(stderr, DPTI_COLOR_RED "[-]" DPTI_COLOR_RESET "Error: Could not allocate memory for filters, terminating.\n");
     exit(1);
   }
 
@@ -182,15 +187,15 @@ filter_info_t* sandboxing_create_filters(void) {
 }
 
 // ---------------------------------------------------------------------------
-void sandboxing_add_syscall_filter_rule(filter_info_t *filters, int nr) {
+void dpti_add_filter_rule(filter_info_t *filters, int nr) {
   filters[nr].allowed = 1;
   filters[nr].num_syscall_args_filtered = 0;
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_add_syscall_argument_filter_rule_int(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, int argument) {
+int dpti_add_filter_rule_int(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, int argument) {
   if(arg_pos < 0 || arg_pos >= MAX_ARGUMENT_NUMBER) {
-    fprintf(stderr, SANDBOXING_COLOR_RED "[-]" SANDBOXING_COLOR_RESET "Error: Trying to create argument filter outside of argument range [0-%d)\n", MAX_ARGUMENT_NUMBER);
+    fprintf(stderr, DPTI_COLOR_RED "[-]" DPTI_COLOR_RESET "Error: Trying to create argument filter outside of argument range [0-%d)\n", MAX_ARGUMENT_NUMBER);
     return -1;
   }
 
@@ -214,9 +219,9 @@ int sandboxing_add_syscall_argument_filter_rule_int(filter_info_t *filters, int 
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_add_syscall_argument_filter_rule_string(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, char *argument) {
+int dpti_add_filter_rule_string(filter_info_t *filters, int nr, int arg_pos, argument_comp_e comp, char *argument) {
   if(arg_pos < 0 || arg_pos >= MAX_ARGUMENT_NUMBER) {
-    fprintf(stderr, SANDBOXING_COLOR_RED "[-]" SANDBOXING_COLOR_RESET "Error: Trying to create argument filter outside of argument range (0-6)\n");
+    fprintf(stderr, DPTI_COLOR_RED "[-]" DPTI_COLOR_RESET "Error: Trying to create argument filter outside of argument range (0-6)\n");
     return -1;
   }
   int argument_len = strlen(argument) + 1;
@@ -241,21 +246,21 @@ int sandboxing_add_syscall_argument_filter_rule_string(filter_info_t *filters, i
 }
 
 // ---------------------------------------------------------------------------
-int sandboxing_init() {
-  sandboxing_fd = open(SANDBOX_DEVICE_PATH, O_RDONLY);
-  if (sandboxing_fd < 0) {
-    fprintf(stderr, SANDBOXING_COLOR_RED "[-]" SANDBOXING_COLOR_RESET "Error: Could not open Sandbox device: %s\n", SANDBOX_DEVICE_PATH);
+int dpti_init() {
+  dpti_fd = open(DPTI_DEVICE_PATH, O_RDONLY);
+  if (dpti_fd < 0) {
+    fprintf(stderr, DPTI_COLOR_RED "[-]" DPTI_COLOR_RESET "Error: Could not open Sandbox device: %s\n", DPTI_DEVICE_PATH);
     return -1;
   }
 
-  sandboxing_max_num_syscalls = sandboxing_get_max_num_syscalls();
+  dpti_max_num_syscalls = dpti_get_max_num_syscalls();
   return 0;
 }
 
 
 // ---------------------------------------------------------------------------
-void sandboxing_cleanup() {
-  if (sandboxing_fd >= 0) {
-    close(sandboxing_fd);
+void dpti_cleanup() {
+  if (dpti_fd >= 0) {
+    close(dpti_fd);
   }
 }

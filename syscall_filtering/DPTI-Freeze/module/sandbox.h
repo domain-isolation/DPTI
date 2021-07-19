@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-#define SANDBOX_DEVICE_NAME "sandbox"
-#define SANDBOX_DEVICE_PATH "/dev/" SANDBOX_DEVICE_NAME
+#define DPTI_DEVICE_NAME "sandbox"
+#define DPTI_DEVICE_PATH "/dev/" DPTI_DEVICE_NAME
 
 #define MAX_ARGUMENT_NUMBER 6
 
@@ -42,7 +42,7 @@ typedef struct {
   size_t pte;
   /** Bitmask indicating which entries are valid/should be updated */
   size_t valid;
-} sandbox_entry_t;
+} dpti_entry_t;
 
 typedef enum {
   UNDEF,
@@ -77,24 +77,24 @@ typedef struct {
   int ref_count;
 } filter_info_t;
 
-#define SANDBOX_VALID_MASK_PGD (1<<0)
-#define SANDBOX_VALID_MASK_P4D (1<<1)
-#define SANDBOX_VALID_MASK_PUD (1<<2)
-#define SANDBOX_VALID_MASK_PMD (1<<3)
-#define SANDBOX_VALID_MASK_PTE (1<<4)
+#define DPTI_VALID_MASK_PGD (1<<0)
+#define DPTI_VALID_MASK_P4D (1<<1)
+#define DPTI_VALID_MASK_PUD (1<<2)
+#define DPTI_VALID_MASK_PMD (1<<3)
+#define DPTI_VALID_MASK_PTE (1<<4)
 
-#define SANDBOX_IOCTL_MAGIC_NUMBER (long)0x3d17
+#define DPTI_IOCTL_MAGIC_NUMBER (long)0x3d17
 
-#define SANDBOX_IOCTL_CMD_VM_RESOLVE \
-  _IOR(SANDBOX_IOCTL_MAGIC_NUMBER, 1, size_t)
+#define DPTI_IOCTL_CMD_VM_RESOLVE \
+  _IOR(DPTI_IOCTL_MAGIC_NUMBER, 1, size_t)
 
-#define SANDBOX_IOCTL_CMD_GET_NUM_SYSCALLS \
-  _IOR(SANDBOX_IOCTL_MAGIC_NUMBER, 2, size_t)
+#define DPTI_IOCTL_CMD_GET_NUM_SYSCALLS \
+  _IOR(DPTI_IOCTL_MAGIC_NUMBER, 2, size_t)
 
-#define SANDBOX_IOCTL_CMD_INSTALL_FILTER \
-  _IOR(SANDBOX_IOCTL_MAGIC_NUMBER, 3, size_t)
+#define DPTI_IOCTL_CMD_INSTALL_FILTER \
+  _IOR(DPTI_IOCTL_MAGIC_NUMBER, 3, size_t)
 
-#define SANDBOX_IOCTL_CMD_PRINT_FILTERS \
-  _IOR(SANDBOX_IOCTL_MAGIC_NUMBER, 4, size_t)
+#define DPTI_IOCTL_CMD_PRINT_FILTERS \
+  _IOR(DPTI_IOCTL_MAGIC_NUMBER, 4, size_t)
 
 #endif // SANDBOX_MODULE_H
